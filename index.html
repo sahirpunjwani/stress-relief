@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wreck the Robot - 3D Sandbox Prototype</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #1a1a2e;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+        }
+
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+
+        /* Game UI Overlay */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Let clicks pass through to the 3D canvas */
+            box-sizing: border-box;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .hud-element {
+            background: rgba(15, 12, 30, 0.75);
+            padding: 12px 24px;
+            border-radius: 12px;
+            border: 2px solid #e94560;
+            color: #fff;
+            font-weight: bold;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            pointer-events: auto; /* Enable buttons/text clicks if needed */
+        }
+
+        #score-board {
+            align-self: flex-start;
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        #coin-icon {
+            color: #ffd700;
+            text-shadow: 0 0 8px #ffaa00;
+        }
+
+        #instructions {
+            align-self: center;
+            margin-bottom: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(255,255,255,0.2);
+            font-size: 14px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.6; }
+            50% { opacity: 1; }
+            100% { opacity: 0.6; }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-layer">
+        <div id="score-board" class="hud-element">
+            <span id="coin-icon">🪙</span> COINS: <span id="coin-count">0</span>
+        </div>
+        <div id="instructions" class="hud-element">
+            Click and drag the robot to smash it!
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import * as CANNON from 'cannon-es';
+
+        // --- Game Variables & Logic State ---
+        let scene, camera, renderer, world;
+        let container = document.getElementById('canvas-container');
+        let coins = 0;
+        const coinCountEl = document.getElementById('coin-count');
+
+        // Physics-Visual syncing arrays
+        const rigidBodies = [];
+        const meshes = [];
+
+        // Interaction state variables
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const plane = new THREE.Plane();
+        const planeNormal = new THREE.Vector3();
+        const intersectionPoint = new THREE.Vector3();
+        
+        let isDragging = false;
+        let dummyPivotBody; // Heavy static physics anchor tracking the cursor
+        let mouseConstraint = null;
+
+        // --- Initialization ---
+        function init() {
+            setupGraphics();
+            setupPhysics();
+            createEnvironment();
+            createRagdoll(0, 5, 0);
+            setupInteraction();
+
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        // --- 1. Graphical Environment Setup ---
+        function setupGraphics() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x11111e);
+            scene.fog = new THREE.FogExp2(0x11111e, 0.015);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 6, 12);
+            camera.lookAt(0, 3, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            // Lighting Setup
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(10, 20, 10);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            dirLight.shadow.camera.near = 0.5;
+            dirLight.shadow.camera.far = 40;
+            const d = 15;
+            dirLight.shadow.camera.left = -d;
+            dirLight.shadow.camera.right = d;
+            dirLight.shadow.camera.top = d;
+            dirLight.shadow.camera.bottom = -d;
+            dirLight.shadow.bias = -0.0005;
+            scene.add(dirLight);
+
+            const grid = new THREE.GridHelper(60, 60, 0x3f3f5c, 0x22223b);
+            grid.position.y = -0.01;
+            scene.add(grid);
+        }
+
+        // --- 2. Physics Engine Setup ---
+        function setupPhysics() {
+            world = new CANNON.World();
+            world.gravity.set(0, -15, 0); // Stylized heavy gravity
+            world.broadphase = new CANNON.NaiveBroadphase();
+            world.solver.iterations = 10;
+
+            // Anchor point for dragging mechanics
+            dummyPivotBody = new CANNON.Body({ mass: 0 });
+            dummyPivotBody.collisionFilterGroup = 0; // Does not collide with anything
+            dummyPivotBody.collisionFilterMask = 0;
+            world.addBody(dummyPivotBody);
+        }
+
+        // --- 3. Build Lab Environment (Floor and Walls) ---
+        function createEnvironment() {
+            // Room Floor
+            createBox(40, 1, 40, 0, -0.5, 0, 0x22223b, 0, true);
+            // Deflecting backwall
+            createBox(40, 30, 1, 0, 15, -10, 0x14142b, 0, true);
+        }
+
+        // Helper to construct environmental boxes easily
+        function createBox(w, h, d, x, y, z, color, mass = 0, receiveShadow = true) {
+            // Visual Object
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.7 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y, z);
+            mesh.castShadow = mass > 0;
+            mesh.receiveShadow = receiveShadow;
+            scene.add(mesh);
+
+            // Physics Object
+            const shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+            const body = new CANNON.Body({ mass: mass });
+            body.addShape(shape);
+            body.position.set(x, y, z);
+            world.addBody(body);
+
+            if(mass > 0) {
+                rigidBodies.push(body);
+                meshes.push(mesh);
+            }
+            return body;
+        }
+
+        // --- 4. Creating the Ragdoll Robot System ---
+        function createRagdoll(x, y, z) {
+            const robotColor = 0x00b4d8;
+            const jointColor = 0xe94560;
+
+            // Dimensions mapping
+            const scale = 1.0;
+            const hW = 0.4 * scale, hH = 0.4 * scale, hD = 0.4 * scale; // Head
+            const tW = 0.7 * scale, tH = 1.4 * scale, tD = 0.5 * scale; // Torso
+            const lW = 0.22 * scale, lH = 0.9 * scale, lD = 0.22 * scale; // Limbs
+
+            // Distinct Body parts
+            const torso = createRagdollPart(tW, tH, tD, x, y, z, robotColor, 4);
+            const head = createRagdollPart(hW, hH, hD, x, y + tH/2 + hH/2 + 0.1, z, 0xffe66d, 1);
+            
+            const leftUpperArm = createRagdollPart(lW, lH, lD, x - tW/2 - lW/2 - 0.05, y + tH/4, z, robotColor, 1);
+            const rightUpperArm = createRagdollPart(lW, lH, lD, x + tW/2 + lW/2 + 0.05, y + tH/4, z, robotColor, 1);
+            
+            const leftLeg = createRagdollPart(lW, lH, lD, x - tW/4, y - tH/2 - lH/2 - 0.05, z, robotColor, 1.5);
+            const rightLeg = createRagdollPart(lW, lH, lD, x + tW/4, y - tH/2 - lH/2 - 0.05, z, robotColor, 1.5);
+
+            // Establish Linkage Joints (Constraints)
+            // Head to Torso
+            addJoint(torso, new CANNON.Vec3(0, tH/2, 0), head, new CANNON.Vec3(0, -hH/2, 0));
+            
+            // Shoulders
+            addJoint(torso, new CANNON.Vec3(-tW/2, tH/3, 0), leftUpperArm, new CANNON.Vec3(0, lH/2, 0));
+            addJoint(torso, new CANNON.Vec3(tW/2, tH/3, 0), rightUpperArm, new CANNON.Vec3(0, lH/2, 0));
+
+            // Hips
+            addJoint(torso, new CANNON.Vec3(-tW/4, -tH/2, 0), leftLeg, new CANNON.Vec3(0, lH/2, 0));
+            addJoint(torso, new CANNON.Vec3(tW/4, -tH/2, 0), rightLeg, new CANNON.Vec3(0, lH/2, 0));
+        }
+
+        function createRagdollPart(w, h, d, x, y, z, color, mass) {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mat = new THREE.MeshStandardMaterial({ color: color, metalness: 0.3, roughness: 0.4 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            const shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+            const body = new CANNON.Body({ mass: mass });
+            body.addShape(shape);
+            body.position.set(x, y, z);
+            
+            // Linear Damping keeps parts from spinning like wild fans endlessly
+            body.linearDamping = 0.15;
+            body.angularDamping = 0.15;
+
+            // Damage system tracking impact force
+            body.addEventListener('collide', (e) => {
+                const contact = e.contact;
+                // Calculate relative impact velocity vector
+                const impactVelocity = contact.getImpactVelocityAlongNormal();
+                
+                if (impactVelocity > 4.0) {
+                    let reward = Math.floor(impactVelocity * 1.5);
+                    coins += reward;
+                    coinCountEl.innerText = coins;
+                    
+                    // Flash part white temporarily on high damage impacts
+                    mesh.material.color.setHex(0xffffff);
+                    setTimeout(() => mesh.material.color.setHex(color), 100);
+                }
+            });
+
+            world.addBody(body);
+            rigidBodies.push(body);
+            meshes.push(mesh);
+
+            return body;
+        }
+
+        function addJoint(bodyA, pivotA, bodyB, pivotB) {
+            // PointToPoint constraint acts like a ball-and-socket socket link
+            const joint = new CANNON.PointToPointConstraint(bodyA, pivotA, bodyB, pivotB);
+            world.addConstraint(joint);
+        }
+
+        // --- 5. Interactive Raycasting & Mouse Joint Controls ---
+        function setupInteraction() {
+            window.addEventListener('pointerdown', onPointerDown);
+            window.addEventListener('pointermove', onPointerMove);
+            window.addEventListener('pointerup', onPointerUp);
+        }
+
+        function onPointerDown(event) {
+            // Map viewport position to standard normalized coordinates (-1 to +1)
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children);
+
+            if (intersects.length > 0) {
+                // Discover matching physical Rigid Body linked with the intersected clicked 3D item mesh
+                const hitMesh = intersects[0].object;
+                const meshIndex = meshes.indexOf(hitMesh);
+
+                if (meshIndex !== -1) {
+                    const hitBody = rigidBodies[meshIndex];
+                    isDragging = true;
+
+                    // Fetch accurate relative offset vector where click specifically touched relative to body center
+                    const hitPoint = intersects[0].point;
+                    const cannonHitPoint = new CANNON.Vec3(hitPoint.x, hitPoint.y, hitPoint.z);
+                    const localPivot = hitBody.toLocalFrame(cannonHitPoint);
+
+                    // Move static tracking pivot to real world space intersection coordinate
+                    dummyPivotBody.position.copy(cannonHitPoint);
+
+                    // Construct temporary high-stiffness spring connection pulling rigid body to your controller anchor
+                    mouseConstraint = new CANNON.PointToPointConstraint(dummyPivotBody, new CANNON.Vec3(0,0,0), hitBody, localPivot);
+                    world.addConstraint(mouseConstraint);
+
+                    // Re-align spatial interaction planes 
+                    planeNormal.copy(camera.position).normalize();
+                    plane.setFromNormalAndCoplanarPoint(planeNormal, hitPoint);
+                }
+            }
+        }
+
+        function onPointerMove(event) {
+            if (!isDragging || !mouseConstraint) return;
+
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            
+            // Read intersection location on alignment drag plane
+            if (raycaster.ray.intersectPlane(plane, intersectionPoint)) {
+                // Step static dummy anchor to match cursor translation position
+                dummyPivotBody.position.set(intersectionPoint.x, intersectionPoint.y, intersectionPoint.z);
+                dummyPivotBody.velocity.set(0,0,0); // Clean damp force spikes
+            }
+        }
+
+        function onPointerUp() {
+            if (isDragging) {
+                world.removeConstraint(mouseConstraint);
+                mouseConstraint = null;
+                isDragging = false;
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- 6. Physics/Visual Render Heartbeat Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Step core physics clock forward securely
+            world.fixedStep(1 / 60);
+
+            // Mirror calculated physical position/rotations directly onto visual Render Engine meshes
+            for (let i = 0; i < rigidBodies.length; i++) {
+                meshes[i].position.copy(rigidBodies[i].position);
+                meshes[i].quaternion.copy(rigidBodies[i].quaternion);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Trigger loop start sequence on script load completion
+        init();
+    </script>
+</body>
+</html>
