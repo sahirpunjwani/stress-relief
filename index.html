@@ -81,16 +81,15 @@
         </div>
         <div id="instructions" class="hud-element">
             <span class="highlight">Left-Click & Drag</span> directly on the robot to smash it!<br>
-            <span class="highlight">Right-Click + Move</span> (or two fingers) to orbit camera | <span class="highlight">Scroll</span> to Zoom
+            <span class="highlight">Right-Click + Drag</span> (or two fingers) to rotate view | <span class="highlight">Scroll wheel</span> to Zoom
         </div>
     </div>
 
     <script type="module">
         import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
         import * as CANNON from 'https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js';
-        import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
 
-        let scene, camera, renderer, world, controls;
+        let scene, camera, renderer, world;
         let container = document.getElementById('canvas-container');
         let coins = 0;
         const coinCountEl = document.getElementById('coin-count');
@@ -98,7 +97,7 @@
         const rigidBodies = [];
         const meshes = [];
 
-        // Drag Systems
+        // Interaction state
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
         const dragPlane = new THREE.Plane(); 
@@ -107,9 +106,15 @@
         let isDragging = false;
         let dummyPivotBody; 
         let mouseConstraint = null;
-
-        // Laptop Drag Indicator (Visual Line)
         let dragLine;
+
+        // Custom Laptop Built-in Camera System (Zero Dependencies)
+        let camTheta = Math.PI / 2; // Horizontal angle
+        let camPhi = Math.PI / 2.3;  // Vertical angle
+        let camRadius = 9.5;        // Zoom distance
+        const camTarget = new THREE.Vector3(0, 3, 0);
+        let isOrbiting = false;
+        let previousPointerPosition = { x: 0, y: 0 };
 
         function init() {
             setupGraphics();
@@ -119,6 +124,7 @@
             setupInteraction();
 
             window.addEventListener('resize', onWindowResize);
+            updateCameraPosition();
             animate();
         }
 
@@ -128,7 +134,6 @@
             scene.fog = new THREE.FogExp2(0x0a0a14, 0.025);
 
             camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(0, 5, 10);
 
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
@@ -136,31 +141,19 @@
             renderer.shadowMap.type = THREE.PCFSoftShadowMap;
             container.appendChild(renderer.domElement);
 
-            // Laptop Trackpad Camera Controls
-            controls = new OrbitControls(camera, renderer.domElement);
-            controls.enableDamping = true;
-            controls.dampingFactor = 0.05;
-            controls.maxPolarAngle = Math.PI / 2 - 0.05; // Don't clip below floor
-            controls.minDistance = 4;
-            controls.maxDistance = 20;
-            controls.target.set(0, 3, 0);
-
-            // Bright, balanced laptop lighting
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
             scene.add(ambientLight);
 
             const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
             dirLight.position.set(10, 20, 10);
             dirLight.castShadow = true;
-            dirLight.shadow.mapSize.width = 1024;
-            dirLight.shadow.mapSize.height = 1024;
             scene.add(dirLight);
 
             const grid = new THREE.GridHelper(50, 50, 0x00b4d8, 0x1f1f3a);
             grid.position.y = 0.01;
             scene.add(grid);
 
-            // Create visual line indicator for pulling
+            // Neon link line for tracking pulls
             const lineMat = new THREE.LineBasicMaterial({ color: 0xe94560, linewidth: 2 });
             const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
             dragLine = new THREE.Line(lineGeo, lineMat);
@@ -170,7 +163,7 @@
 
         function setupPhysics() {
             world = new CANNON.World();
-            world.gravity.set(0, -22, 0); // Snappy gravity ideal for smaller laptop screens
+            world.gravity.set(0, -22, 0); 
             world.solver.iterations = 12; 
 
             dummyPivotBody = new CANNON.Body({ mass: 0 });
@@ -181,22 +174,18 @@
         }
 
         function createEnvironment() {
-            // Main Arena Floor
             createBox(40, 1, 40, 0, -0.5, 0, 0x1f1f3a, 0);
 
-            // Invisible Invisible Containment Walls so robot stays close on trackpad flips
+            // Transparent boundary lines
             const wallMat = new THREE.MeshStandardMaterial({ 
                 color: 0x00b4d8, 
                 transparent: true, 
-                opacity: 0.05, 
+                opacity: 0.03, 
                 wireframe: true 
             });
             
-            // Back boundary
             createCustomWall(30, 20, 1, 0, 10, -8, wallMat);
-            // Left boundary
             createCustomWall(1, 20, 20, -10, 10, 0, wallMat);
-            // Right boundary
             createCustomWall(1, 20, 20, 10, 10, 0, wallMat);
         }
 
@@ -243,7 +232,6 @@
             const leftLeg = createRagdollPart(lW, lH, lD, x - 0.22, y - tH/2 - lH/2, z, 0x03045e, 1.5);
             const rightLeg = createRagdollPart(lW, lH, lD, x + 0.22, y - tH/2 - lH/2, z, 0x03045e, 1.5);
 
-            // Stable physical node connections
             addJoint(torso, new CANNON.Vec3(0, tH/2, 0), head, new CANNON.Vec3(0, -hR, 0));
             addJoint(torso, new CANNON.Vec3(-tW/2, 0.3, 0), leftArm, new CANNON.Vec3(0, lH/2, 0));
             addJoint(torso, new CANNON.Vec3(tW/2, 0.3, 0), rightArm, new CANNON.Vec3(0, lH/2, 0));
@@ -253,7 +241,7 @@
 
         function createRagdollPart(w, h, d, x, y, z, color, mass) {
             const geo = new THREE.BoxGeometry(w, h, d);
-            const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.3, metalness: 0.1 });
+            const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.3 });
             const mesh = new THREE.Mesh(geo, mat);
             mesh.castShadow = true;
             scene.add(mesh);
@@ -263,7 +251,6 @@
             body.addShape(shape);
             body.position.set(x, y, z);
             
-            // Higher damping values neutralize infinite jittering on lower-end laptop trackpads
             body.linearDamping = 0.2;
             body.angularDamping = 0.2;
 
@@ -291,57 +278,86 @@
             world.addConstraint(constraint);
         }
 
+        // Camera positioning math
+        function updateCameraPosition() {
+            // Prevent vertical camera inversion
+            camPhi = Math.max(0.1, Math.min(Math.PI / 2 - 0.05, camPhi)); 
+
+            camera.position.x = camTarget.x + camRadius * Math.sin(camPhi) * Math.sin(camTheta);
+            camera.position.y = camTarget.y + camRadius * Math.cos(camPhi);
+            camera.position.z = camTarget.z + camRadius * Math.sin(camPhi) * Math.cos(camTheta);
+            camera.lookAt(camTarget);
+        }
+
         function setupInteraction() {
-            // Use standard pointer events to seamlessly catch touchpads, external mice, and pointers alike
-            renderer.domElement.addEventListener('pointerdown', onPointerDown, { passive: false });
-            renderer.domElement.addEventListener('pointermove', onPointerMove, { passive: false });
+            // Intercept right click context menus so right clicks can be used to drag camera smoothly
+            window.addEventListener('contextmenu', e => e.preventDefault());
+
+            container.addEventListener('pointerdown', onPointerDown);
+            container.addEventListener('pointermove', onPointerMove);
             window.addEventListener('pointerup', onPointerUp);
+            container.addEventListener('wheel', onWindowWheel, { passive: false });
         }
 
         function onPointerDown(event) {
-            // Stop camera manipulation ONLY if we clicked using primary button (Left Click)
-            if (event.button !== 0) return; 
+            // Right-click or Touchpad modifier: Handle Camera Orbit
+            if (event.button === 2 || event.ctrlKey) {
+                isOrbiting = true;
+                previousPointerPosition = { x: event.clientX, y: event.clientY };
+                return;
+            }
 
-            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            // Left-click: Handle Ragdoll Object Grabbing
+            if (event.button === 0) {
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
-            raycaster.setFromCamera(mouse, camera);
-            const intersects = raycaster.intersectObjects(meshes, false);
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObjects(meshes, false);
 
-            if (intersects.length > 0) {
-                // Intercept camera rotation engine to lock viewpoint securely during drag
-                controls.enabled = false;
+                if (intersects.length > 0) {
+                    const hitMesh = intersects[0].object;
+                    const index = meshes.indexOf(hitMesh);
 
-                const hitMesh = intersects[0].object;
-                const index = meshes.indexOf(hitMesh);
+                    if (index !== -1) {
+                        isDragging = true;
+                        const hitBody = rigidBodies[index];
+                        const hitPoint = intersects[0].point;
 
-                if (index !== -1) {
-                    isDragging = true;
-                    const hitBody = rigidBodies[index];
-                    const hitPoint = intersects[0].point;
+                        const normal = new THREE.Vector3();
+                        camera.getWorldDirection(normal);
+                        normal.negate(); 
+                        dragPlane.setFromNormalAndCoplanarPoint(normal, hitPoint);
 
-                    // Form flat math plane facing the screen camera for cleaner spatial calculations
-                    const normal = new THREE.Vector3();
-                    camera.getWorldDirection(normal);
-                    normal.negate(); 
-                    dragPlane.setFromNormalAndCoplanarPoint(normal, hitPoint);
+                        dummyPivotBody.position.set(hitPoint.x, hitPoint.y, hitPoint.z);
+                        const localPivot = hitBody.toLocalFrame(new CANNON.Vec3(hitPoint.x, hitPoint.y, hitPoint.z));
 
-                    dummyPivotBody.position.set(hitPoint.x, hitPoint.y, hitPoint.z);
-                    const localPivot = hitBody.toLocalFrame(new CANNON.Vec3(hitPoint.x, hitPoint.y, hitPoint.z));
+                        if (mouseConstraint) world.removeConstraint(mouseConstraint);
 
-                    if (mouseConstraint) world.removeConstraint(mouseConstraint);
+                        mouseConstraint = new CANNON.PointToPointConstraint(dummyPivotBody, new CANNON.Vec3(0, 0, 0), hitBody, localPivot);
+                        world.addConstraint(mouseConstraint);
 
-                    // Slightly soft spring force makes pulling on small laptop mousepad interfaces look smooth
-                    mouseConstraint = new CANNON.PointToPointConstraint(dummyPivotBody, new CANNON.Vec3(0, 0, 0), hitBody, localPivot);
-                    world.addConstraint(mouseConstraint);
-
-                    // Show pull indicator line
-                    dragLine.visible = true;
+                        dragLine.visible = true;
+                    }
                 }
             }
         }
 
         function onPointerMove(event) {
+            // Case A: Camera Orbit Movement
+            if (isOrbiting) {
+                const deltaX = event.clientX - previousPointerPosition.x;
+                const deltaY = event.clientY - previousPointerPosition.y;
+
+                camTheta -= deltaX * 0.007;
+                camPhi -= deltaY * 0.007;
+
+                previousPointerPosition = { x: event.clientX, y: event.clientY };
+                updateCameraPosition();
+                return;
+            }
+
+            // Case B: Physics Grab Dragging
             if (!isDragging || !mouseConstraint) return;
 
             mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
@@ -353,30 +369,36 @@
                 dummyPivotBody.position.set(intersectionPoint.x, intersectionPoint.y, intersectionPoint.z);
                 mouseConstraint.bodyB.wakeUp();
 
-                // Draw pull indicator string between actual object mesh and targeted cursor point
+                // Update neon connector string points
                 const bodyPos = mouseConstraint.bodyB.position;
                 const positions = dragLine.geometry.attributes.position.array;
-                
                 positions[0] = bodyPos.x;
                 positions[1] = bodyPos.y;
                 positions[2] = bodyPos.z;
                 positions[3] = intersectionPoint.x;
                 positions[4] = intersectionPoint.y;
                 positions[5] = intersectionPoint.z;
-                
                 dragLine.geometry.attributes.position.needsUpdate = true;
             }
         }
 
-        function onPointerUp() {
+        function onPointerUp(event) {
+            if (isOrbiting) isOrbiting = false;
+            
             if (isDragging) {
                 world.removeConstraint(mouseConstraint);
                 mouseConstraint = null;
                 isDragging = false;
                 dragLine.visible = false;
             }
-            // Hand control mechanics back over to camera rig natively
-            controls.enabled = true;
+        }
+
+        function onWindowWheel(event) {
+            event.preventDefault();
+            // Scroll Wheel / Two-Finger Swipe Zoom limits
+            camRadius += event.deltaY * 0.006;
+            camRadius = Math.max(4, Math.min(18, camRadius));
+            updateCameraPosition();
         }
 
         function onWindowResize() {
@@ -390,13 +412,11 @@
 
             world.fixedStep(1 / 60);
 
-            // Map physical transformations onto render shapes
             for (let i = 0; i < rigidBodies.length; i++) {
                 meshes[i].position.copy(rigidBodies[i].position);
                 meshes[i].quaternion.copy(rigidBodies[i].quaternion);
             }
 
-            // Sync visual path tracker during drag states
             if (isDragging && mouseConstraint) {
                 const bodyPos = mouseConstraint.bodyB.position;
                 const positions = dragLine.geometry.attributes.position.array;
@@ -406,7 +426,440 @@
                 dragLine.geometry.attributes.position.needsUpdate = true;
             }
 
-            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wreck the Robot - Laptop Sandbox</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #0d0d1a;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            user-select: none;
+            touch-action: none;
+        }
+
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            box-sizing: border-box;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            z-index: 10;
+        }
+
+        .hud-element {
+            background: rgba(10, 10, 25, 0.85);
+            padding: 12px 24px;
+            border-radius: 12px;
+            border: 2px solid #00b4d8;
+            color: #fff;
+            font-weight: bold;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+            backdrop-filter: blur(4px);
+        }
+
+        #score-board {
+            align-self: flex-start;
+            font-size: 24px;
+            border-color: #ffd700;
+        }
+
+        #instructions {
+            align-self: center;
+            margin-bottom: 20px;
+            font-size: 13px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            text-align: center;
+            line-height: 1.6;
+        }
+        
+        .highlight {
+            color: #e94560;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-layer">
+        <div id="score-board" class="hud-element">
+            🪙 COINS: <span id="coin-count">0</span>
+        </div>
+        <div id="instructions" class="hud-element">
+            <span class="highlight">Left-Click & Drag</span> directly on the robot to smash it!<br>
+            <span class="highlight">Right-Click + Drag</span> (or two fingers) to rotate view | <span class="highlight">Scroll wheel</span> to Zoom
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+        import * as CANNON from 'https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js';
+
+        let scene, camera, renderer, world;
+        let container = document.getElementById('canvas-container');
+        let coins = 0;
+        const coinCountEl = document.getElementById('coin-count');
+
+        const rigidBodies = [];
+        const meshes = [];
+
+        // Interaction state
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const dragPlane = new THREE.Plane(); 
+        const intersectionPoint = new THREE.Vector3();
+        
+        let isDragging = false;
+        let dummyPivotBody; 
+        let mouseConstraint = null;
+        let dragLine;
+
+        // Custom Laptop Built-in Camera System (Zero Dependencies)
+        let camTheta = Math.PI / 2; // Horizontal angle
+        let camPhi = Math.PI / 2.3;  // Vertical angle
+        let camRadius = 9.5;        // Zoom distance
+        const camTarget = new THREE.Vector3(0, 3, 0);
+        let isOrbiting = false;
+        let previousPointerPosition = { x: 0, y: 0 };
+
+        function init() {
+            setupGraphics();
+            setupPhysics();
+            createEnvironment();
+            createRagdoll(0, 5, 0);
+            setupInteraction();
+
+            window.addEventListener('resize', onWindowResize);
+            updateCameraPosition();
+            animate();
+        }
+
+        function setupGraphics() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0a14);
+            scene.fog = new THREE.FogExp2(0x0a0a14, 0.025);
+
+            camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(10, 20, 10);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            const grid = new THREE.GridHelper(50, 50, 0x00b4d8, 0x1f1f3a);
+            grid.position.y = 0.01;
+            scene.add(grid);
+
+            // Neon link line for tracking pulls
+            const lineMat = new THREE.LineBasicMaterial({ color: 0xe94560, linewidth: 2 });
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+            dragLine = new THREE.Line(lineGeo, lineMat);
+            dragLine.visible = false;
+            scene.add(dragLine);
+        }
+
+        function setupPhysics() {
+            world = new CANNON.World();
+            world.gravity.set(0, -22, 0); 
+            world.solver.iterations = 12; 
+
+            dummyPivotBody = new CANNON.Body({ mass: 0 });
+            dummyPivotBody.type = CANNON.Body.STATIC;
+            dummyPivotBody.collisionFilterGroup = 0; 
+            dummyPivotBody.collisionFilterMask = 0;
+            world.addBody(dummyPivotBody);
+        }
+
+        function createEnvironment() {
+            createBox(40, 1, 40, 0, -0.5, 0, 0x1f1f3a, 0);
+
+            // Transparent boundary lines
+            const wallMat = new THREE.MeshStandardMaterial({ 
+                color: 0x00b4d8, 
+                transparent: true, 
+                opacity: 0.03, 
+                wireframe: true 
+            });
+            
+            createCustomWall(30, 20, 1, 0, 10, -8, wallMat);
+            createCustomWall(1, 20, 20, -10, 10, 0, wallMat);
+            createCustomWall(1, 20, 20, 10, 10, 0, wallMat);
+        }
+
+        function createBox(w, h, d, x, y, z, color, mass = 0) {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.4 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y, z);
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            const shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+            const body = new CANNON.Body({ mass: mass });
+            body.addShape(shape);
+            body.position.set(x, y, z);
+            world.addBody(body);
+            return body;
+        }
+
+        function createCustomWall(w, h, d, x, y, z, material) {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mesh = new THREE.Mesh(geo, material);
+            mesh.position.set(x, y, z);
+            scene.add(mesh);
+
+            const shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+            const body = new CANNON.Body({ mass: 0 });
+            body.addShape(shape);
+            body.position.set(x, y, z);
+            world.addBody(body);
+        }
+
+        function createRagdoll(x, y, z) {
+            const tW = 0.8, tH = 1.3, tD = 0.5; 
+            const hR = 0.32; 
+            const lW = 0.24, lH = 0.85, lD = 0.24; 
+
+            const torso = createRagdollPart(tW, tH, tD, x, y, z, 0x00b4d8, 5);
+            const head = createRagdollPart(hR*2, hR*2, hR*2, x, y + tH/2 + hR, z, 0xffe66d, 1.2);
+            
+            const leftArm = createRagdollPart(lW, lH, lD, x - tW/2 - lW/2, y + 0.3, z, 0x0077b6, 1);
+            const rightArm = createRagdollPart(lW, lH, lD, x + tW/2 + lW/2, y + 0.3, z, 0x0077b6, 1);
+            
+            const leftLeg = createRagdollPart(lW, lH, lD, x - 0.22, y - tH/2 - lH/2, z, 0x03045e, 1.5);
+            const rightLeg = createRagdollPart(lW, lH, lD, x + 0.22, y - tH/2 - lH/2, z, 0x03045e, 1.5);
+
+            addJoint(torso, new CANNON.Vec3(0, tH/2, 0), head, new CANNON.Vec3(0, -hR, 0));
+            addJoint(torso, new CANNON.Vec3(-tW/2, 0.3, 0), leftArm, new CANNON.Vec3(0, lH/2, 0));
+            addJoint(torso, new CANNON.Vec3(tW/2, 0.3, 0), rightArm, new CANNON.Vec3(0, lH/2, 0));
+            addJoint(torso, new CANNON.Vec3(-0.22, -tH/2, 0), leftLeg, new CANNON.Vec3(0, lH/2, 0));
+            addJoint(torso, new CANNON.Vec3(0.22, -tH/2, 0), rightLeg, new CANNON.Vec3(0, lH/2, 0));
+        }
+
+        function createRagdollPart(w, h, d, x, y, z, color, mass) {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.3 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.castShadow = true;
+            scene.add(mesh);
+
+            const shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+            const body = new CANNON.Body({ mass: mass });
+            body.addShape(shape);
+            body.position.set(x, y, z);
+            
+            body.linearDamping = 0.2;
+            body.angularDamping = 0.2;
+
+            body.addEventListener('collide', (e) => {
+                const speed = e.contact.getImpactVelocityAlongNormal();
+                if (speed > 4.5) {
+                    let earned = Math.floor(speed * 1.2);
+                    coins += earned;
+                    coinCountEl.innerText = coins;
+
+                    mesh.material.color.setHex(0xe94560);
+                    setTimeout(() => mesh.material.color.setHex(color), 100);
+                }
+            });
+
+            world.addBody(body);
+            rigidBodies.push(body);
+            meshes.push(mesh);
+
+            return body;
+        }
+
+        function addJoint(bodyA, pivotA, bodyB, pivotB) {
+            const constraint = new CANNON.PointToPointConstraint(bodyA, pivotA, bodyB, pivotB);
+            world.addConstraint(constraint);
+        }
+
+        // Camera positioning math
+        function updateCameraPosition() {
+            // Prevent vertical camera inversion
+            camPhi = Math.max(0.1, Math.min(Math.PI / 2 - 0.05, camPhi)); 
+
+            camera.position.x = camTarget.x + camRadius * Math.sin(camPhi) * Math.sin(camTheta);
+            camera.position.y = camTarget.y + camRadius * Math.cos(camPhi);
+            camera.position.z = camTarget.z + camRadius * Math.sin(camPhi) * Math.cos(camTheta);
+            camera.lookAt(camTarget);
+        }
+
+        function setupInteraction() {
+            // Intercept right click context menus so right clicks can be used to drag camera smoothly
+            window.addEventListener('contextmenu', e => e.preventDefault());
+
+            container.addEventListener('pointerdown', onPointerDown);
+            container.addEventListener('pointermove', onPointerMove);
+            window.addEventListener('pointerup', onPointerUp);
+            container.addEventListener('wheel', onWindowWheel, { passive: false });
+        }
+
+        function onPointerDown(event) {
+            // Right-click or Touchpad modifier: Handle Camera Orbit
+            if (event.button === 2 || event.ctrlKey) {
+                isOrbiting = true;
+                previousPointerPosition = { x: event.clientX, y: event.clientY };
+                return;
+            }
+
+            // Left-click: Handle Ragdoll Object Grabbing
+            if (event.button === 0) {
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObjects(meshes, false);
+
+                if (intersects.length > 0) {
+                    const hitMesh = intersects[0].object;
+                    const index = meshes.indexOf(hitMesh);
+
+                    if (index !== -1) {
+                        isDragging = true;
+                        const hitBody = rigidBodies[index];
+                        const hitPoint = intersects[0].point;
+
+                        const normal = new THREE.Vector3();
+                        camera.getWorldDirection(normal);
+                        normal.negate(); 
+                        dragPlane.setFromNormalAndCoplanarPoint(normal, hitPoint);
+
+                        dummyPivotBody.position.set(hitPoint.x, hitPoint.y, hitPoint.z);
+                        const localPivot = hitBody.toLocalFrame(new CANNON.Vec3(hitPoint.x, hitPoint.y, hitPoint.z));
+
+                        if (mouseConstraint) world.removeConstraint(mouseConstraint);
+
+                        mouseConstraint = new CANNON.PointToPointConstraint(dummyPivotBody, new CANNON.Vec3(0, 0, 0), hitBody, localPivot);
+                        world.addConstraint(mouseConstraint);
+
+                        dragLine.visible = true;
+                    }
+                }
+            }
+        }
+
+        function onPointerMove(event) {
+            // Case A: Camera Orbit Movement
+            if (isOrbiting) {
+                const deltaX = event.clientX - previousPointerPosition.x;
+                const deltaY = event.clientY - previousPointerPosition.y;
+
+                camTheta -= deltaX * 0.007;
+                camPhi -= deltaY * 0.007;
+
+                previousPointerPosition = { x: event.clientX, y: event.clientY };
+                updateCameraPosition();
+                return;
+            }
+
+            // Case B: Physics Grab Dragging
+            if (!isDragging || !mouseConstraint) return;
+
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            
+            if (raycaster.ray.intersectPlane(dragPlane, intersectionPoint)) {
+                dummyPivotBody.position.set(intersectionPoint.x, intersectionPoint.y, intersectionPoint.z);
+                mouseConstraint.bodyB.wakeUp();
+
+                // Update neon connector string points
+                const bodyPos = mouseConstraint.bodyB.position;
+                const positions = dragLine.geometry.attributes.position.array;
+                positions[0] = bodyPos.x;
+                positions[1] = bodyPos.y;
+                positions[2] = bodyPos.z;
+                positions[3] = intersectionPoint.x;
+                positions[4] = intersectionPoint.y;
+                positions[5] = intersectionPoint.z;
+                dragLine.geometry.attributes.position.needsUpdate = true;
+            }
+        }
+
+        function onPointerUp(event) {
+            if (isOrbiting) isOrbiting = false;
+            
+            if (isDragging) {
+                world.removeConstraint(mouseConstraint);
+                mouseConstraint = null;
+                isDragging = false;
+                dragLine.visible = false;
+            }
+        }
+
+        function onWindowWheel(event) {
+            event.preventDefault();
+            // Scroll Wheel / Two-Finger Swipe Zoom limits
+            camRadius += event.deltaY * 0.006;
+            camRadius = Math.max(4, Math.min(18, camRadius));
+            updateCameraPosition();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            world.fixedStep(1 / 60);
+
+            for (let i = 0; i < rigidBodies.length; i++) {
+                meshes[i].position.copy(rigidBodies[i].position);
+                meshes[i].quaternion.copy(rigidBodies[i].quaternion);
+            }
+
+            if (isDragging && mouseConstraint) {
+                const bodyPos = mouseConstraint.bodyB.position;
+                const positions = dragLine.geometry.attributes.position.array;
+                positions[0] = bodyPos.x;
+                positions[1] = bodyPos.y;
+                positions[2] = bodyPos.z;
+                dragLine.geometry.attributes.position.needsUpdate = true;
+            }
+
             renderer.render(scene, camera);
         }
 
