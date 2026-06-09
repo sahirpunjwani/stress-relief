@@ -62,6 +62,9 @@
             text-transform: uppercase;
         }
     </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"></script>
 </head>
 <body>
 
@@ -76,19 +79,8 @@
         </div>
     </div>
 
-    <script type="importmap">
-        {
-            "imports": {
-                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-                "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
-            }
-        }
-    </script>
-
-    <script type="module">
-        import * as THREE from 'three';
-        import * as CANNON from 'cannon-es';
-
+    <script>
+        // Use global variables assigned by the traditional script headers above
         let scene, camera, renderer, world;
         let container = document.getElementById('canvas-container');
         let coins = 0;
@@ -101,7 +93,6 @@
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
         
-        // This math plane always faces the camera directly at the item's depth for clean dragging
         const dragPlane = new THREE.Plane(); 
         const intersectionPoint = new THREE.Vector3();
         
@@ -133,7 +124,6 @@
             renderer.shadowMap.enabled = true;
             container.appendChild(renderer.domElement);
 
-            // Bright lighting so everything is clearly visible
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
             scene.add(ambientLight);
 
@@ -149,9 +139,8 @@
         function setupPhysics() {
             world = new CANNON.World();
             world.gravity.set(0, -18, 0); 
-            world.solver.iterations = 15; // Higher solver accuracy for strong pulling forces
+            world.solver.iterations = 15; 
 
-            // Invisible physical handle for mouse tracking
             dummyPivotBody = new CANNON.Body({ mass: 0 });
             dummyPivotBody.type = CANNON.Body.STATIC;
             dummyPivotBody.collisionFilterGroup = 0; 
@@ -160,9 +149,7 @@
         }
 
         function createEnvironment() {
-            // Floor
             createBox(30, 1, 30, 0, -0.5, 0, 0x22223b, 0);
-            // Back Wall
             createBox(30, 20, 1, 0, 10, -5, 0x14142b, 0);
         }
 
@@ -183,12 +170,10 @@
         }
 
         function createRagdoll(x, y, z) {
-            // Measurements
-            const tW = 0.8, tH = 1.4, tD = 0.5; // Torso
-            const hR = 0.35; // Head
-            const lW = 0.25, lH = 0.9, lD = 0.25; // Limbs
+            const tW = 0.8, tH = 1.4, tD = 0.5; 
+            const hR = 0.35; 
+            const lW = 0.25, lH = 0.9, lD = 0.25; 
 
-            // Build individual physical modules
             const torso = createRagdollPart(tW, tH, tD, x, y, z, 0x00b4d8, 4);
             const head = createRagdollPart(hR*2, hR*2, hR*2, x, y + tH/2 + hR, z, 0xffe66d, 1);
             
@@ -198,13 +183,9 @@
             const leftLeg = createRagdollPart(lW, lH, lD, x - 0.25, y - tH/2 - lH/2, z, 0x03045e, 1);
             const rightLeg = createRagdollPart(lW, lH, lD, x + 0.25, y - tH/2 - lH/2, z, 0x03045e, 1);
 
-            // Connect using high stability PointToPoint joints
-            // Neck
             addJoint(torso, new CANNON.Vec3(0, tH/2, 0), head, new CANNON.Vec3(0, -hR, 0));
-            // Shoulders
             addJoint(torso, new CANNON.Vec3(-tW/2, 0.4, 0), leftArm, new CANNON.Vec3(0, lH/2, 0));
             addJoint(torso, new CANNON.Vec3(tW/2, 0.4, 0), rightArm, new CANNON.Vec3(0, lH/2, 0));
-            // Hips
             addJoint(torso, new CANNON.Vec3(-0.25, -tH/2, 0), leftLeg, new CANNON.Vec3(0, lH/2, 0));
             addJoint(torso, new CANNON.Vec3(0.25, -tH/2, 0), rightLeg, new CANNON.Vec3(0, lH/2, 0));
         }
@@ -221,11 +202,9 @@
             body.addShape(shape);
             body.position.set(x, y, z);
             
-            // Critical: Dampings stop parts from fluttering wildly out of control
             body.linearDamping = 0.1;
             body.angularDamping = 0.1;
 
-            // Collision damage listener
             body.addEventListener('collide', (e) => {
                 const speed = e.contact.getImpactVelocityAlongNormal();
                 if (speed > 5) {
@@ -240,7 +219,6 @@
 
             world.addBody(body);
             
-            // Keep arrays perfectly synchronized by index matching
             rigidBodies.push(body);
             meshes.push(mesh);
 
@@ -252,7 +230,6 @@
             world.addConstraint(constraint);
         }
 
-        // --- Drag Execution Fixes ---
         function setupInteraction() {
             window.addEventListener('pointerdown', onPointerDown, { passive: false });
             window.addEventListener('pointermove', onPointerMove, { passive: false });
@@ -260,13 +237,10 @@
         }
 
         function onPointerDown(event) {
-            // Accurate Window Dimension Normalization
             mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
             mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
             raycaster.setFromCamera(mouse, camera);
-            
-            // Look ONLY directly for intersections inside the robot limb meshes array
             const intersects = raycaster.intersectObjects(meshes, false);
 
             if (intersects.length > 0) {
@@ -278,22 +252,17 @@
                     const hitBody = rigidBodies[index];
                     const hitPoint = intersects[0].point;
 
-                    // Compute precise drag math plane facing camera viewport normal
                     const normal = new THREE.Vector3();
                     camera.getWorldDirection(normal);
-                    normal.negate(); // Flip plane forward towards look angle
+                    normal.negate(); 
                     dragPlane.setFromNormalAndCoplanarPoint(normal, hitPoint);
 
-                    // Position the static mouse handle right at the point of impact
                     dummyPivotBody.position.set(hitPoint.x, hitPoint.y, hitPoint.z);
 
-                    // Compute target offset inside the object space
                     const localPivot = hitBody.toLocalFrame(new CANNON.Vec3(hitPoint.x, hitPoint.y, hitPoint.z));
 
-                    // Remove existing constraint if any was left behind
                     if (mouseConstraint) world.removeConstraint(mouseConstraint);
 
-                    // Lock object to your invisible mouse pointer handle
                     mouseConstraint = new CANNON.PointToPointConstraint(dummyPivotBody, new CANNON.Vec3(0, 0, 0), hitBody, localPivot);
                     world.addConstraint(mouseConstraint);
                 }
@@ -308,10 +277,8 @@
 
             raycaster.setFromCamera(mouse, camera);
             
-            // Project screen space to 3D world coordinates across our tracking math plane
             if (raycaster.ray.intersectPlane(dragPlane, intersectionPoint)) {
                 dummyPivotBody.position.set(intersectionPoint.x, intersectionPoint.y, intersectionPoint.z);
-                // Wake up sleeping physical bodies while moving them
                 mouseConstraint.bodyB.wakeUp(); 
             }
         }
@@ -333,10 +300,8 @@
         function animate() {
             requestAnimationFrame(animate);
 
-            // Step Cannon physics
             world.fixedStep(1 / 60);
 
-            // Update visible Three.js shapes
             for (let i = 0; i < rigidBodies.length; i++) {
                 meshes[i].position.copy(rigidBodies[i].position);
                 meshes[i].quaternion.copy(rigidBodies[i].quaternion);
